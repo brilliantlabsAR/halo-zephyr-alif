@@ -108,6 +108,45 @@ void dsi_dw_intr_en(uintptr_t regs)
 					DSI_INT_1_TO_HP_TX);
 }
 
+void dsi_dw_intr_dis(uintptr_t regs)
+{
+	sys_clear_bits(regs + DSI_INT_MSK0, DSI_INT_0_DPHY_ERR_4 |
+					DSI_INT_0_DPHY_ERR_3 |
+					DSI_INT_0_DPHY_ERR_2 |
+					DSI_INT_0_DPHY_ERR_1 |
+					DSI_INT_0_DPHY_ERR_0 |
+					DSI_INT_0_ACK_WITH_ERR_15 |
+					DSI_INT_0_ACK_WITH_ERR_14 |
+					DSI_INT_0_ACK_WITH_ERR_13 |
+					DSI_INT_0_ACK_WITH_ERR_12 |
+					DSI_INT_0_ACK_WITH_ERR_11 |
+					DSI_INT_0_ACK_WITH_ERR_10 |
+					DSI_INT_0_ACK_WITH_ERR_9 |
+					DSI_INT_0_ACK_WITH_ERR_8 |
+					DSI_INT_0_ACK_WITH_ERR_7 |
+					DSI_INT_0_ACK_WITH_ERR_6 |
+					DSI_INT_0_ACK_WITH_ERR_5 |
+					DSI_INT_0_ACK_WITH_ERR_4 |
+					DSI_INT_0_ACK_WITH_ERR_3 |
+					DSI_INT_0_ACK_WITH_ERR_2 |
+					DSI_INT_0_ACK_WITH_ERR_1 |
+					DSI_INT_0_ACK_WITH_ERR_0);
+
+	sys_clear_bits(regs + DSI_INT_MSK1, DSI_INT_1_DPI_BUFF_PLD_UNDER |
+					DSI_INT_1_GEN_PLD_RECEV_ERR |
+					DSI_INT_1_GEN_PLD_SEND_ERR |
+					DSI_INT_1_GEN_PLD_WR_ERR |
+					DSI_INT_1_GEN_CMD_WR_ERR |
+					DSI_INT_1_DPI_PLD_WR_ERR |
+					DSI_INT_1_EOTP_ERR |
+					DSI_INT_1_PKT_SIZE_ERR |
+					DSI_INT_1_CRC_ERR |
+					DSI_INT_1_ECC_MULTI_ERR |
+					DSI_INT_1_ECC_SINGLE_ERR |
+					DSI_INT_1_TO_LP_RX |
+					DSI_INT_1_TO_HP_TX);
+}
+
 /* Setup functions */
 void dsi_dw_phy_clk_timer_setup(uintptr_t regs,
 		struct dphy_dsi_settings *phy)
@@ -852,6 +891,21 @@ static int dsi_dw_attach(const struct device *dev,
 	return 0;
 }
 
+static int dsi_dw_detach(const struct device *dev,
+		uint8_t channel,
+		const struct mipi_dsi_device *mdev)
+{
+	const struct dsi_dw_config *config = dev->config;
+	uintptr_t regs = DEVICE_MMIO_GET(dev);
+
+	LOG_DBG("Detach called.");
+	dphy_dw_master_stop(config->tx_dphy); 
+	dsi_dw_intr_dis(regs);
+	dsi_dw_pwr_down(regs);
+
+	return 0;
+}
+
 #define HEADER(channel, type, data0, data1)				\
 	((((channel) & DSI_GEN_HDR_VC_MASK) << DSI_GEN_HDR_VC_SHIFT) |	\
 	(((type) & DSI_GEN_HDR_DT_MASK) << DSI_GEN_HDR_DT_SHIFT) |	\
@@ -1189,6 +1243,7 @@ static int dsi_dw_init(const struct device *dev)
 
 static struct mipi_dsi_driver_api dsi_dw_api = {
 	.attach = dsi_dw_attach,
+	.detach = dsi_dw_detach,
 	.transfer = dsi_dw_transfer,
 };
 

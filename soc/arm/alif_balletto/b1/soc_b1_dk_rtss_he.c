@@ -21,7 +21,7 @@ LOG_MODULE_REGISTER(soc, CONFIG_SOC_LOG_LEVEL);
 
 static bool balletto_do_dcdc_fix(void);
 #define ALIF_B1_SOC_RUN_PROFILE_PRIORITY 2
-#define ALIF_B1_SOC_INIT_PRIORITY 3
+#define ALIF_B1_SOC_INIT_PRIORITY        3
 
 /**
  * Set the RUN profile parameters for this application.
@@ -55,7 +55,18 @@ static int pm_set_run_params(void)
 		runp.ip_clock_gating |= CDC200_MASK | MIPI_DSI_MASK | GPU_MASK;
 	}
 
-	return se_service_set_run_cfg(&runp);
+	const int err = se_service_set_run_cfg(&runp);
+
+	if (!err) {
+		/* Workaround: Change clk sources to PLL */
+		sys_write32(0x00, CGU_BASE + 0x4); // unlock PLL
+		sys_write32(0x00110111, CGU_BASE + 0x8);
+		sys_write32(0x02, HOST_BASE_SYS_CTRL + 0x0810);
+		sys_write32(0x02, HOST_BASE_SYS_CTRL + 0x0820);
+		sys_write32(0x02, HOST_BASE_SYS_CTRL + 0x0840);
+		sys_write32(0x01, CGU_BASE + 0x4); // lock PLL
+	}
+	return err;
 }
 
 /*
@@ -113,7 +124,7 @@ static bool balletto_do_dcdc_fix(void)
 		return false;
 	}
 #endif
-return true;
+	return true;
 }
 
 /**
@@ -216,25 +227,25 @@ static int balletto_b1_dk_rtss_he_init(void)
 	}
 
 	/* SPI: Enable Master Mode and SS Val */
-#if  UTIL_AND(DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(spi0)), \
-	!DT_PROP(DT_NODELABEL(spi0), serial_target))
+#if UTIL_AND(DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(spi0)),                                          \
+	     !DT_PROP(DT_NODELABEL(spi0), serial_target))
 	sys_set_bit(EXPSLV_SSI_CTRL, 0);
 	sys_set_bit(EXPSLV_SSI_CTRL, 8);
 #endif
 
-#if  UTIL_AND(DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(spi1)), \
-	!DT_PROP(DT_NODELABEL(spi1), serial_target))
+#if UTIL_AND(DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(spi1)),                                          \
+	     !DT_PROP(DT_NODELABEL(spi1), serial_target))
 	sys_set_bit(EXPSLV_SSI_CTRL, 1);
 	sys_set_bit(EXPSLV_SSI_CTRL, 9);
 #endif
 
-#if  UTIL_AND(DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(spi2)), \
-	!DT_PROP(DT_NODELABEL(spi2), serial_target))
+#if UTIL_AND(DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(spi2)),                                          \
+	     !DT_PROP(DT_NODELABEL(spi2), serial_target))
 	sys_set_bit(EXPSLV_SSI_CTRL, 2);
 	sys_set_bit(EXPSLV_SSI_CTRL, 10);
 #endif
 
-#if  DT_NODE_HAS_STATUS(DT_NODELABEL(lpspi0), okay)
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(lpspi0), okay)
 	/*Clock : LP-SPI*/
 	sys_set_bit(M55HE_CFG_HE_CLK_ENA, 16);
 
@@ -250,9 +261,6 @@ static int balletto_b1_dk_rtss_he_init(void)
 	sys_clear_bit(M55HE_CFG_HE_CLK_ENA, 15);
 #endif
 #endif
-
-
-
 
 	/* Enable DMA */
 #if DT_NODE_HAS_COMPAT_STATUS(DT_NODELABEL(dma2), arm_dma_pl330, okay)

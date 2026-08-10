@@ -417,10 +417,46 @@ out:
 	return rc;
 }
 
+/* Re-derive the oldest log-file id (and resync file_ctr) from a single directory
+ * scan. Used to recover when the rotation counters go stale — e.g. the log files
+ * were deleted externally by a user clear. Returns the lowest log-file numeral,
+ * or -1 if no log files exist. Far cheaper than probing every numeral, which on a
+ * full/slow filesystem would block the shared log thread. */
+static int find_oldest_log_id(void)
+{
+	struct fs_dir_t dir;
+	struct fs_dirent ent;
+	int rc, id, min = -1, count = 0;
+
+	fs_dir_t_init(&dir);
+	if (fs_opendir(&dir, CONFIG_LOG_BACKEND_FS_DIR)) {
+		return -1;
+	}
+
+	while (true) {
+		rc = fs_readdir(&dir, &ent);
+		if ((rc < 0) || (ent.name[0] == 0)) {
+			break;
+		}
+		id = get_log_file_id(&ent);
+		if (id >= 0) {
+			count++;
+			if ((min < 0) || (id < min)) {
+				min = id;
+			}
+		}
+	}
+
+	(void)fs_closedir(&dir);
+	file_ctr = count;
+	return min;
+}
+
 static int del_oldest_log(void)
 {
 	int rc;
 	static char dellname[MAX_PATH_LEN];
+	int rescanned = 0;
 
 	while (true) {
 		snprintf(dellname, sizeof(dellname), "%s/%s%04d",
@@ -428,17 +464,43 @@ static int del_oldest_log(void)
 			 CONFIG_LOG_BACKEND_FS_FILE_PREFIX, oldest);
 		rc = fs_unlink(dellname);
 
-		if ((rc == 0) || (rc == -ENOENT)) {
+		if (rc == 0) {
+			--file_ctr;
 			oldest++;
 			if (oldest > MAX_FILE_NUMERAL) {
 				oldest = 0;
 			}
+			break;
+		} else if ((rc == -ENOENT) && !rescanned) {
+			/* The file our counter points to is gone (log files were
+			 * removed externally, e.g. a user clear). Re-derive the
+			 * oldest id from ONE directory scan rather than probing
+			 * every numeral up to MAX_FILE_NUMERAL: on a full/slow
+			 * filesystem that probe blocks the shared log thread —
+			 * silencing every backend, including UART — and each
+			 * failed unlink logs an error, feeding the very backlog
+			 * this is trying to make room for.
+			 */
+			int id = find_oldest_log_id();
 
-			if (rc == 0) {
-				--file_ctr;
+			rescanned = 1;
+			if (id < 0) {
+				/* No log files exist: nothing left to reclaim. */
+				file_ctr = 0;
+				rc = -ENOENT;
 				break;
 			}
+			oldest = id;
+			/* loop once more to unlink the real oldest */
 		} else {
+			/* Hard error, or already rescanned without finding the
+			 * file: give up. The caller treats a negative return as
+			 * "can't make room" and stops cleanly (marks the backend
+			 * corrupted) instead of spinning.
+			 */
+			if (rc == -ENOENT) {
+				file_ctr = 0;
+			}
 			break;
 		}
 	}
@@ -448,6 +510,19 @@ static int del_oldest_log(void)
 
 BUILD_ASSERT(!IS_ENABLED(CONFIG_LOG_MODE_IMMEDIATE),
 	     "Immediate logging is not supported by LOG FS backend.");
+
+void log_backend_fs_reset(void)
+{
+	if (backend_state == BACKEND_FS_OK) {
+		(void)fs_close(&fs_file);
+		fs_file_t_init(&fs_file);
+	}
+
+	backend_state = BACKEND_FS_NOT_INITIALIZED;
+	file_ctr = 0;
+	newest = 0;
+	oldest = 0;
+}
 
 #ifndef CONFIG_LOG_BACKEND_FS_TESTSUITE
 

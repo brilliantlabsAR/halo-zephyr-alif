@@ -182,6 +182,21 @@ static int pwm_alif_utimer_init(const struct device *dev)
 	uintptr_t timer_base = DEVICE_MMIO_NAMED_GET(dev, timer);
 	uintptr_t global_base = DEVICE_MMIO_NAMED_GET(dev, global);
 	int32_t ret;
+	
+	/* reset pwm */
+	if (alif_utimer_counter_running(global_base, cfg->timer_id)) {
+		alif_utimer_stop_counter(global_base, cfg->timer_id);
+	}
+
+	for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+		alif_utimer_disable_driver(timer_base, ch);
+		alif_utimer_disable_compare_match(timer_base, ch);
+	}
+
+	alif_utimer_set_counter_reload_value(timer_base, 0);
+	for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+		alif_utimer_set_compare_value(timer_base, ch, 0);
+	}
 
 	/* apply pin configuration */
 	ret = pinctrl_apply_state(cfg->pcfg, PINCTRL_STATE_DEFAULT);

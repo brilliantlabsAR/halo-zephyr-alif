@@ -7,9 +7,10 @@
 
 #include <zephyr/drivers/video.h>
 
-K_HEAP_DEFINE(video_buffer_pool,
+Z_HEAP_DEFINE_IN_SECT(video_buffer_pool,
 	      CONFIG_VIDEO_BUFFER_POOL_SZ_MAX *
-	      CONFIG_VIDEO_BUFFER_POOL_NUM_MAX);
+	      CONFIG_VIDEO_BUFFER_POOL_NUM_MAX,
+	      __alif_ns_section);
 
 static struct video_buffer video_buf[CONFIG_VIDEO_BUFFER_POOL_NUM_MAX];
 

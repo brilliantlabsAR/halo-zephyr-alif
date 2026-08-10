@@ -51,6 +51,12 @@ int dphy_dw_master_setup(const struct device *dev,
 int dphy_dw_slave_setup(const struct device *dev,
 		struct dphy_csi2_settings *phy);
 
+
+/*
+ * Stop the D-PHY as TX-PHY.
+ */
+int dphy_dw_master_stop(const struct device *dev);
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */

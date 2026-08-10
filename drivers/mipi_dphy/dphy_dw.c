@@ -642,6 +642,22 @@ static int dphy_dw_enable_clocks(const struct device *dev)
 }
 #endif /* DT_ANY_INST_HAS_PROP_STATUS_OKAY(clocks) */
 
+int dphy_dw_master_stop(const struct device *dev)
+{
+	struct dphy_dw_data *data = dev->data;
+	uintptr_t dsi_regs = DEVICE_MMIO_NAMED_GET(dev, dsi_reg);
+	/*
+	 * Put D-PHY in shutdown mode prior to configuring the D-PHY.
+	 * Set RSTZ = 0, SHUTDOWNZ = 0
+	 */
+	sys_clear_bits(dsi_regs + DSI_PHY_RSTZ, DSI_PHY_RSTZ_PHY_RSTZ | DSI_PHY_RSTZ_PHY_SHUTDOWNZ);
+
+	data->is_dsi_initialized = false;
+
+	return 0;
+}
+
+
 static int dphy_dw_init(const struct device *dev)
 {
 	const struct dphy_dw_config *config = dev->config;

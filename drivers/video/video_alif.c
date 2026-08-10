@@ -13,6 +13,8 @@ LOG_MODULE_REGISTER(CPI, CONFIG_VIDEO_LOG_LEVEL);
 #include <zephyr/sys/device_mmio.h>
 #include <zephyr/drivers/pinctrl.h>
 
+#include <zephyr/pm/device.h>
+
 #include "video_alif.h"
 #include <zephyr/drivers/video/video_alif.h>
 
@@ -614,6 +616,90 @@ static int cam_set_signal(const struct device *dev, enum video_endpoint_id ep,
 }
 #endif
 
+/* ============================================================================
+ * Power Management Support
+ * ============================================================================ */
+
+#ifdef CONFIG_PM_DEVICE
+/**
+ * @brief PM callback handler for video camera power management
+ *
+ * Handles suspend/resume events from pm_manager
+ */
+static int cam_pm_callback(const struct device *dev, enum pm_device_action action)
+{
+	const struct video_cam_config *config = dev->config;
+	struct video_cam_data *data = dev->data;
+	int ret = 0;
+
+	switch (action) {
+	case PM_DEVICE_ACTION_SUSPEND:
+		LOG_DBG("Video camera PM suspend");
+
+		/* Stop streaming if active */
+		if (data->state == STATE_STREAMING) {
+			ret = cam_stream_stop(dev);
+			if (ret != 0) {
+				LOG_ERR("Failed to stop stream during suspend: %d", ret);
+				return ret;
+			}
+		}
+
+		/* Suspend sensor if available */
+		if (config->sensor) {
+			ret = pm_device_action_run(config->sensor, PM_DEVICE_ACTION_SUSPEND);
+			if (ret != 0 && ret != -EALREADY) {
+				LOG_ERR("Failed to suspend camera sensor: %d", ret);
+				return ret;
+			}
+		}
+
+#ifdef CONFIG_VIDEO_MIPI_CSI2_DW
+		/* Suspend CSI bus if available */
+		if (config->csi_bus) {
+			ret = pm_device_action_run(config->csi_bus, PM_DEVICE_ACTION_SUSPEND);
+			if (ret != 0 && ret != -EALREADY) {
+				LOG_ERR("Failed to suspend CSI bus: %d", ret);
+				return ret;
+			}
+		}
+#endif /* CONFIG_VIDEO_MIPI_CSI2_DW */
+
+		break;
+
+	case PM_DEVICE_ACTION_RESUME:
+		LOG_DBG("Video camera PM resume");
+
+#ifdef CONFIG_VIDEO_MIPI_CSI2_DW
+		/* Resume CSI bus if available */
+		if (config->csi_bus) {
+			ret = pm_device_action_run(config->csi_bus, PM_DEVICE_ACTION_RESUME);
+			if (ret != 0 && ret != -EALREADY) {
+				LOG_ERR("Failed to resume CSI bus: %d", ret);
+				return ret;
+			}
+		}
+#endif /* CONFIG_VIDEO_MIPI_CSI2_DW */
+
+		/* Resume sensor if available */
+		if (config->sensor) {
+			ret = pm_device_action_run(config->sensor, PM_DEVICE_ACTION_RESUME);
+			if (ret != 0 && ret != -EALREADY) {
+				LOG_ERR("Failed to resume camera sensor: %d", ret);
+				return ret;
+			}
+		}
+
+		break;
+
+	default:
+		break;
+	}
+
+	return ret;
+}
+#endif /* CONFIG_PM_DEVICE */
+
 static const struct video_driver_api cam_driver_api = {
 	.set_format = cam_set_fmt,
 	.get_format = cam_get_fmt,
@@ -875,6 +961,9 @@ static int video_cam_init(const struct device *dev)
 		}
 	}
 
+#if CONFIG_PM_DEVICE
+	pm_device_init_suspended(dev);
+#endif
 	data->state = STATE_INIT;
 
 	return 0;
@@ -919,8 +1008,10 @@ static int video_cam_init(const struct device *dev)
 	};                                                                                         \
                                                                                                    \
 	static struct video_cam_data data_##i;                                                     \
-	DEVICE_DT_INST_DEFINE(i, &video_cam_init, NULL, &data_##i, &config_##i, POST_KERNEL,       \
-			      CONFIG_VIDEO_ALIF_CAM_INIT_PRIORITY, &cam_driver_api);               \
+	PM_DEVICE_DT_INST_DEFINE(i, cam_pm_callback);                                               \
+	DEVICE_DT_INST_DEFINE(i, &video_cam_init, PM_DEVICE_DT_INST_GET(i), &data_##i,             \
+			      &config_##i, POST_KERNEL, CONFIG_VIDEO_ALIF_CAM_INIT_PRIORITY,       \
+			      &cam_driver_api);                                                    \
                                                                                                    \
 	static void cam_config_func_##i(const struct device *dev)                                  \
 	{                                                                                          \

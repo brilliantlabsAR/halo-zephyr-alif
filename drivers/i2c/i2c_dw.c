@@ -689,6 +689,77 @@ static int i2c_dw_setup(const struct device *dev, uint16_t slave_address)
 	return 0;
 }
 
+#if defined(CONFIG_PINCTRL_ALIF)
+/*
+ * Recover a controller that saw a START it did not generate (e.g. a glitch
+ * while a device on the bus powers up or down) and never saw the matching
+ * STOP: it then treats the bus as owned by another master and holds every
+ * queued command, so each transfer times out until the SoC is reset.
+ * Disabling the controller does not clear that state, and a bus clear done
+ * with the controller disabled is not seen by it.
+ *
+ * This only runs when a timed-out transfer left commands queued with the
+ * controller idle; a transfer that is really in progress is left alone.
+ * Flush the stale FIFO by disabling, re-enable with nothing queued and wait
+ * until the enable has taken effect, then briefly turn off each pad's input
+ * buffer (REN) in turn, which the controller reads as that line going low.
+ * With the other line high, the SDA pulse looks like START followed by STOP
+ * and the SCL pulse like a stray clock, which it ignores. Each level is held
+ * for 100 us. The bus lines themselves are never driven.
+ */
+static bool i2c_dw_wait_enable_status(uint32_t reg_base, bool enabled)
+{
+	for (int i = 0; i < 10; i++) {
+		if (!!test_bit_enable_status_en(reg_base) == enabled) {
+			return true;
+		}
+		k_busy_wait(100);
+	}
+	return false;
+}
+
+static void i2c_dw_recover_phantom_start(const struct device *dev)
+{
+	const struct i2c_dw_rom_config * const rom = dev->config;
+	uint32_t reg_base = get_regs(dev);
+	const struct pinctrl_state *state;
+
+	/* Only the proven wedge: commands queued but the controller idle. Leave
+	 * a transfer that is really in progress (e.g. clock stretching) alone. */
+	if (test_bit_status_activity(reg_base) || read_txflr(reg_base) == 0) {
+		return;
+	}
+
+	clear_bit_enable_en(reg_base);
+	if (!i2c_dw_wait_enable_status(reg_base, false)) {
+		LOG_ERR("%s: transfer timed out, controller did not disable", dev->name);
+		return;
+	}
+	(void)read_clr_intr(reg_base);
+	set_bit_enable_en(reg_base);
+	/* The enable takes effect a few us later; a pulse that starts before
+	 * then has no falling edge for the controller to see. */
+	if (!i2c_dw_wait_enable_status(reg_base, true) || rom->pcfg == NULL ||
+	    pinctrl_lookup_state(rom->pcfg, PINCTRL_STATE_DEFAULT, &state) != 0) {
+		LOG_ERR("%s: transfer timed out, bus recovery not possible", dev->name);
+		return;
+	}
+
+	for (uint8_t i = 0; i < state->pin_cnt; i++) {
+		pinctrl_soc_pin_t pin = state->pins[i] & ~PAD_CONF_REN(1);
+
+		(void)pinctrl_configure_pins(&pin, 1, PINCTRL_REG_NONE);
+		k_busy_wait(100);
+		(void)pinctrl_configure_pins(&state->pins[i], 1, PINCTRL_REG_NONE);
+		k_busy_wait(100);
+	}
+
+	(void)read_clr_intr(reg_base);
+	LOG_WRN("%s: transfer timed out with the controller idle, bus-busy state reset",
+		dev->name);
+}
+#endif
+
 static int i2c_dw_transfer(const struct device *dev,
 			   struct i2c_msg *msgs, uint8_t num_msgs,
 			   uint16_t slave_address)
@@ -794,6 +865,9 @@ static int i2c_dw_transfer(const struct device *dev,
 		if (ret != 0) {
 			write_intr_mask(DW_DISABLE_ALL_I2C_INT, reg_base);
 			value = read_clr_intr(reg_base);
+#if defined(CONFIG_PINCTRL_ALIF)
+			i2c_dw_recover_phantom_start(dev);
+#endif
 			break;
 		}
 

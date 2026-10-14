@@ -698,8 +698,9 @@ static int i2c_dw_setup(const struct device *dev, uint16_t slave_address)
  * Disabling the controller does not clear that state, and a bus clear done
  * with the controller disabled is not seen by it.
  *
- * This only runs when a timed-out transfer left commands queued with the
- * controller idle; a transfer that is really in progress is left alone.
+ * The reset runs when a timed-out transfer left commands queued with the
+ * controller idle, and on request through i2c_recover_bus(); a transfer that
+ * is really in progress is left alone either way.
  * Flush the stale FIFO by disabling, re-enable with nothing queued and wait
  * until the enable has taken effect, then briefly turn off each pad's input
  * buffer (REN) in turn, which the controller reads as that line going low.
@@ -718,22 +719,17 @@ static bool i2c_dw_wait_enable_status(uint32_t reg_base, bool enabled)
 	return false;
 }
 
-static void i2c_dw_recover_phantom_start(const struct device *dev)
+/* Caller holds bus_mutex and has checked that no transfer is in progress. */
+static int i2c_dw_reset_bus_busy(const struct device *dev)
 {
 	const struct i2c_dw_rom_config * const rom = dev->config;
 	uint32_t reg_base = get_regs(dev);
 	const struct pinctrl_state *state;
 
-	/* Only the proven wedge: commands queued but the controller idle. Leave
-	 * a transfer that is really in progress (e.g. clock stretching) alone. */
-	if (test_bit_status_activity(reg_base) || read_txflr(reg_base) == 0) {
-		return;
-	}
-
 	clear_bit_enable_en(reg_base);
 	if (!i2c_dw_wait_enable_status(reg_base, false)) {
-		LOG_ERR("%s: transfer timed out, controller did not disable", dev->name);
-		return;
+		LOG_ERR("%s: controller did not disable", dev->name);
+		return -EIO;
 	}
 	(void)read_clr_intr(reg_base);
 	set_bit_enable_en(reg_base);
@@ -741,8 +737,8 @@ static void i2c_dw_recover_phantom_start(const struct device *dev)
 	 * then has no falling edge for the controller to see. */
 	if (!i2c_dw_wait_enable_status(reg_base, true) || rom->pcfg == NULL ||
 	    pinctrl_lookup_state(rom->pcfg, PINCTRL_STATE_DEFAULT, &state) != 0) {
-		LOG_ERR("%s: transfer timed out, bus recovery not possible", dev->name);
-		return;
+		LOG_ERR("%s: bus-busy state cannot be reset", dev->name);
+		return -EIO;
 	}
 
 	for (uint8_t i = 0; i < state->pin_cnt; i++) {
@@ -755,8 +751,44 @@ static void i2c_dw_recover_phantom_start(const struct device *dev)
 	}
 
 	(void)read_clr_intr(reg_base);
-	LOG_WRN("%s: transfer timed out with the controller idle, bus-busy state reset",
-		dev->name);
+	return 0;
+}
+
+static void i2c_dw_recover_phantom_start(const struct device *dev)
+{
+	uint32_t reg_base = get_regs(dev);
+
+	/* Only the proven wedge: commands queued but the controller idle. Leave
+	 * a transfer that is really in progress (e.g. clock stretching) alone. */
+	if (test_bit_status_activity(reg_base) || read_txflr(reg_base) == 0) {
+		return;
+	}
+
+	if (i2c_dw_reset_bus_busy(dev) == 0) {
+		LOG_WRN("%s: transfer timed out with the controller idle, bus-busy state reset",
+			dev->name);
+	}
+}
+
+/*
+ * Reset the bus-busy state on request, e.g. by the driver of a device whose
+ * power-up is known to glitch the bus, before the next transfer has to time
+ * out first.
+ */
+static int i2c_dw_recover_bus(const struct device *dev)
+{
+	struct i2c_dw_dev_config * const dw = dev->data;
+	int ret;
+
+	(void)k_mutex_lock(&dw->bus_mutex, K_FOREVER);
+	if (test_bit_status_activity(get_regs(dev)) || (dw->state & I2C_DW_BUSY)) {
+		ret = -EBUSY;
+	} else {
+		ret = i2c_dw_reset_bus_busy(dev);
+	}
+	k_mutex_unlock(&dw->bus_mutex);
+
+	return ret;
 }
 #endif
 
@@ -1194,6 +1226,9 @@ static void i2c_dw_slave_read_clear_intr_bits(const struct device *dev)
 static const struct i2c_driver_api funcs = {
 	.configure = i2c_dw_runtime_configure,
 	.transfer = i2c_dw_transfer,
+#if defined(CONFIG_PINCTRL_ALIF)
+	.recover_bus = i2c_dw_recover_bus,
+#endif
 #ifdef CONFIG_I2C_TARGET
 	.target_register = i2c_dw_slave_register,
 	.target_unregister = i2c_dw_slave_unregister,

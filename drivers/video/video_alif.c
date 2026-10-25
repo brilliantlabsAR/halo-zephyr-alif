@@ -389,6 +389,13 @@ static int cam_stream_start(const struct device *dev)
 	data->curr_vid_buf = (uint32_t)vbuf->buffer;
 	sys_write32(LOCAL_TO_GLOBAL(data->curr_vid_buf), regs + CAM_FRAME_ADDR);
 
+	/*
+	 * Clear status left over while interrupts were off: a frame stopped
+	 * mid-capture leaves STOP set, which would otherwise fire as soon as
+	 * it is enabled and hand back the new buffer before any data arrives.
+	 */
+	sys_write32(sys_read32(regs + CAM_INTR), regs + CAM_INTR);
+
 	/* Setup the interrupts. */
 	hw_enable_interrupts(regs, INTR_VSYNC | INTR_BRESP_ERR | INTR_OUTFIFO_OVERRUN |
 					   INTR_INFIFO_OVERRUN | INTR_STOP);

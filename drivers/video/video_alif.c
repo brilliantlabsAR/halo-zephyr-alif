@@ -75,6 +75,29 @@ static inline void hw_disable_interrupts(uintptr_t regs, uint32_t intr_mask)
 	sys_clear_bits(regs + CAM_INTR_ENA, intr_mask);
 }
 
+/*
+ * Stop video capture and wait for the CPI to stop writing the frame buffer.
+ * Clearing CAM_CTRL only stops at the end of the current frame: if the sensor
+ * stops (or is powered down) mid-frame that never comes and BUSY stays set,
+ * so after the wait the controller is soft-reset to abort the transfer.
+ */
+static void hw_cam_stop_video_capture(const struct device *dev)
+{
+	uintptr_t regs = DEVICE_MMIO_GET(dev);
+
+	sys_write32(0, regs + CAM_CTRL);
+
+	for (int i = 0; (i < 20) && (sys_read32(regs + CAM_CTRL) & CAM_CTRL_BUSY); i++) {
+		k_msleep(1);
+	}
+
+	if (sys_read32(regs + CAM_CTRL) & CAM_CTRL_BUSY) {
+		LOG_WRN("CPI still busy after stop: resetting");
+		sys_write32(CAM_CTRL_SW_RESET, regs + CAM_CTRL);
+		sys_write32(0, regs + CAM_CTRL);
+	}
+}
+
 static inline void hw_cam_start_video_capture(const struct device *dev)
 {
 	const struct video_cam_config *config = dev->config;
@@ -347,8 +370,13 @@ static int cam_stream_start(const struct device *dev)
 	}
 
 	if (sys_read32(regs + CAM_CTRL) & CAM_CTRL_BUSY) {
-		LOG_ERR("Can\'t start stream. Already Capturing!");
-		return -EBUSY;
+		/* Left busy by a stream stopped mid-frame: not streaming, so
+		 * nothing is in flight that a stop can't abort. */
+		hw_cam_stop_video_capture(dev);
+		if (sys_read32(regs + CAM_CTRL) & CAM_CTRL_BUSY) {
+			LOG_ERR("Can\'t start stream. Already Capturing!");
+			return -EBUSY;
+		}
 	}
 
 	/* Update the Video-buffer address to CPI-Controller. */
@@ -391,7 +419,6 @@ static int cam_stream_stop(const struct device *dev)
 	const struct video_cam_config *config = dev->config;
 	struct video_cam_data *data = dev->data;
 	uintptr_t regs = DEVICE_MMIO_GET(dev);
-	uint32_t mask;
 	int ret;
 
 	if (data->state == STATE_STANDBY) {
@@ -418,20 +445,11 @@ static int cam_stream_stop(const struct device *dev)
 	hw_disable_interrupts(regs, INTR_VSYNC | INTR_BRESP_ERR | INTR_OUTFIFO_OVERRUN |
 					    INTR_INFIFO_OVERRUN | INTR_STOP);
 
-	/* Stop the Camera sensor to dump image. */
-	sys_write32(0, regs + CAM_CTRL);
+	/* Stop capture; returns once the video buffer is no longer accessed. */
+	hw_cam_stop_video_capture(dev);
 
 	/* Set the Current buffer state to NULL*/
 	data->curr_vid_buf = 0;
-
-	/*
-	 * Poll on Busy flag of CPI to find out when the video buffer
-	 * is no longer accessed.
-	 */
-	mask = CAM_CTRL_BUSY;
-	for (int i = 0; (i < 20) && (sys_read32(regs + CAM_CTRL) & mask) == mask; i++) {
-		k_msleep(1);
-	}
 	LOG_DBG("Stream stopped");
 
 	data->state = STATE_STANDBY;
@@ -444,7 +462,6 @@ static int cam_flush(const struct device *dev, enum video_endpoint_id ep, bool c
 	struct video_cam_data *data = dev->data;
 	uintptr_t regs = DEVICE_MMIO_GET(dev);
 	struct video_buffer *vbuf = NULL;
-	uint32_t mask;
 
 	if (!cancel) {
 		if (!data->curr_vid_buf) {
@@ -468,17 +485,8 @@ static int cam_flush(const struct device *dev, enum video_endpoint_id ep, bool c
 		 */
 		/* Disable the Stop interrupt. */
 		hw_disable_interrupts(regs, INTR_STOP);
-		/* Stop Video capture. */
-		sys_write32(0, regs + CAM_CTRL);
-
-		/*
-		 * Poll on Busy flag of CPI to find out when the video buffer
-		 * is no longer accessed.
-		 */
-		mask = CAM_CTRL_BUSY;
-		for (int i = 0; (i < 20) && (sys_read32(regs + CAM_CTRL) & mask) == mask; i++) {
-			k_msleep(1);
-		}
+		/* Stop capture; returns once the video buffer is no longer accessed. */
+		hw_cam_stop_video_capture(dev);
 
 		while ((vbuf = k_fifo_get(&data->fifo_in, K_NO_WAIT))) {
 			k_fifo_put(&data->fifo_out, vbuf);

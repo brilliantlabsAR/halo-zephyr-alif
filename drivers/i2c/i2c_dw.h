@@ -148,6 +148,9 @@ struct i2c_dw_dev_config {
 	uint32_t		request_bytes;
 	uint8_t			xfr_flags;
 	bool			support_hs_mode;
+	/* Messages after the current one, for the ISR to queue */
+	struct i2c_msg		*next_msg;
+	uint8_t			next_left;
 #ifdef CONFIG_I2C_DW_LPSS_DMA
 	uintptr_t phy_addr;
 	uintptr_t base_addr;

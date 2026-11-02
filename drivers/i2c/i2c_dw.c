@@ -360,6 +360,47 @@ static inline void i2c_dw_write_byte_non_blocking(const struct device *dev, uint
 static void i2c_dw_slave_read_clear_intr_bits(const struct device *dev);
 #endif
 
+/* Make msg the current message; last: end it with a STOP. */
+static void i2c_dw_msg_load(const struct device *dev, struct i2c_msg *msg, bool last)
+{
+	struct i2c_dw_dev_config * const dw = dev->data;
+	uint8_t pflags = dw->xfr_flags;
+
+	/* Workaround for I2C scanner as DW HW does not support 0 byte transfers.*/
+	if ((msg->len == 0) && (msg->buf != NULL)) {
+		msg->len = 1;
+	}
+
+	dw->xfr_buf = msg->buf;
+	dw->xfr_len = msg->len;
+	dw->xfr_flags = msg->flags;
+	dw->rx_pending = 0U;
+#ifdef CONFIG_I2C_TARGET_BUFFER_MODE
+	dw->buf_byte_idx = 0U;
+#endif
+
+	/* Need to RESTART if changing transfer direction */
+	if ((pflags & I2C_MSG_RW_MASK)
+	    != (dw->xfr_flags & I2C_MSG_RW_MASK)) {
+		dw->xfr_flags |= I2C_MSG_RESTART;
+	}
+
+	/* Send STOP if this is the last message */
+	if (last) {
+		dw->xfr_flags |= I2C_MSG_STOP;
+	}
+
+	dw->state &= ~(I2C_DW_CMD_SEND | I2C_DW_CMD_RECV);
+
+	if ((dw->xfr_flags & I2C_MSG_RW_MASK) == I2C_MSG_WRITE) {
+		dw->state |= I2C_DW_CMD_SEND;
+		dw->request_bytes = 0U;
+	} else {
+		dw->state |= I2C_DW_CMD_RECV;
+		dw->request_bytes = dw->xfr_len;
+	}
+}
+
 static void i2c_dw_isr(const struct device *port)
 {
 	struct i2c_dw_dev_config * const dw = port->data;
@@ -427,6 +468,32 @@ static void i2c_dw_isr(const struct device *port)
 			if ((dw->xfr_flags & I2C_MSG_RW_MASK)
 			    == I2C_MSG_WRITE) {
 				ret = i2c_dw_data_send(port);
+
+				/* A write without a STOP is all in the FIFO: queue
+				 * the next message now. The controller has no
+				 * IC_EMPTYFIFO_HOLD_MASTER, so if the FIFO runs dry it
+				 * ends the transfer with a STOP. Handing the next
+				 * message back to the thread let that happen whenever
+				 * the thread woke more than ~140 us late (the last
+				 * byte at 100 kHz), e.g. behind BLE work: the read
+				 * after a register-address write then ended on that
+				 * STOP with -EIO, its commands left in the FIFO.
+				 */
+				while ((ret == 0) && (dw->xfr_len == 0U) &&
+				       !(dw->xfr_flags & I2C_MSG_STOP) &&
+				       (dw->next_left > 0U)) {
+					i2c_dw_msg_load(port, dw->next_msg,
+							dw->next_left == 1U);
+					dw->next_msg++;
+					dw->next_left--;
+					if ((dw->xfr_flags & I2C_MSG_RW_MASK)
+					    == I2C_MSG_WRITE) {
+						ret = i2c_dw_data_send(port);
+					} else {
+						set_bit_intr_mask_tx_empty(reg_base);
+						i2c_dw_data_ask(port);
+					}
+				}
 			} else {
 				i2c_dw_data_ask(port);
 			}
@@ -799,7 +866,6 @@ static int i2c_dw_transfer(const struct device *dev,
 	struct i2c_dw_dev_config * const dw = dev->data;
 	struct i2c_msg *cur_msg = msgs;
 	uint8_t msg_left = num_msgs;
-	uint8_t pflags;
 	int ret;
 	uint32_t reg_base = get_regs(dev);
 	uint32_t value = 0;
@@ -846,41 +912,9 @@ static int i2c_dw_transfer(const struct device *dev,
 
 		/* Process all the messages */
 	while (msg_left > 0) {
-		/* Workaround for I2C scanner as DW HW does not support 0 byte transfers.*/
-		if ((cur_msg->len == 0) && (cur_msg->buf != NULL)) {
-			cur_msg->len = 1;
-		}
-
-		pflags = dw->xfr_flags;
-
-		dw->xfr_buf = cur_msg->buf;
-		dw->xfr_len = cur_msg->len;
-		dw->xfr_flags = cur_msg->flags;
-		dw->rx_pending = 0U;
-#ifdef CONFIG_I2C_TARGET_BUFFER_MODE
-		dw->buf_byte_idx = 0U;
-#endif
-
-		/* Need to RESTART if changing transfer direction */
-		if ((pflags & I2C_MSG_RW_MASK)
-		    != (dw->xfr_flags & I2C_MSG_RW_MASK)) {
-			dw->xfr_flags |= I2C_MSG_RESTART;
-		}
-
-		/* Send STOP if this is the last message */
-		if (msg_left == 1U) {
-			dw->xfr_flags |= I2C_MSG_STOP;
-		}
-
-		dw->state &= ~(I2C_DW_CMD_SEND | I2C_DW_CMD_RECV);
-
-		if ((dw->xfr_flags & I2C_MSG_RW_MASK) == I2C_MSG_WRITE) {
-			dw->state |= I2C_DW_CMD_SEND;
-			dw->request_bytes = 0U;
-		} else {
-			dw->state |= I2C_DW_CMD_RECV;
-			dw->request_bytes = dw->xfr_len;
-		}
+		i2c_dw_msg_load(dev, cur_msg, msg_left == 1U);
+		dw->next_msg = cur_msg + 1;
+		dw->next_left = msg_left - 1U;
 
 		/* Enable interrupts to trigger ISR */
 		if (test_bit_con_master_mode(reg_base)) {
@@ -914,8 +948,9 @@ static int i2c_dw_transfer(const struct device *dev,
 			break;
 		}
 
-		cur_msg++;
-		msg_left--;
+		/* The ISR may have gone on through later messages */
+		cur_msg = dw->next_msg;
+		msg_left = dw->next_left;
 	}
 
 	pm_device_busy_clear(dev);
